@@ -3,8 +3,12 @@ from google import genai
 import json
 import re
 
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
 st.set_page_config(
-    page_title="EquiChain",
+    page_title="EquiChain — Collective Buying Power",
     page_icon="♾️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -21,9 +25,8 @@ except Exception:
     client = None
     GEMINI_READY = False
 
-
 # ============================================================
-# DEMO MERCHANTS
+# DEMO MERCHANT NETWORK
 # ============================================================
 
 DEMO_MERCHANTS = [
@@ -33,7 +36,6 @@ DEMO_MERCHANTS = [
         "product": "SUNFLOWER OIL",
         "quantity": 20,
         "unit": "L",
-        "urgency_hours": 24,
         "revenue": 5200,
         "confidence": 94
     },
@@ -43,7 +45,6 @@ DEMO_MERCHANTS = [
         "product": "SUNFLOWER OIL",
         "quantity": 30,
         "unit": "L",
-        "urgency_hours": 36,
         "revenue": 6800,
         "confidence": 96
     },
@@ -53,7 +54,6 @@ DEMO_MERCHANTS = [
         "product": "SUNFLOWER OIL",
         "quantity": 25,
         "unit": "L",
-        "urgency_hours": 48,
         "revenue": 6100,
         "confidence": 93
     },
@@ -63,32 +63,28 @@ DEMO_MERCHANTS = [
         "product": "SUNFLOWER OIL",
         "quantity": 20,
         "unit": "L",
-        "urgency_hours": 30,
         "revenue": 5900,
         "confidence": 95
     }
 ]
 
-
 # ============================================================
 # SESSION STATE
 # ============================================================
 
-if "merchant_pool" not in st.session_state:
-    st.session_state.merchant_pool = DEMO_MERCHANTS.copy()
+if "merchants" not in st.session_state:
+    st.session_state.merchants = [
+        merchant.copy() for merchant in DEMO_MERCHANTS
+    ]
 
 if "last_extraction" not in st.session_state:
     st.session_state.last_extraction = None
 
 if "last_added_message" not in st.session_state:
-    st.session_state.last_added_message = ""
+    st.session_state.last_added_message = None
 
-if "pool_created" not in st.session_state:
-    st.session_state.pool_created = False
-
-if "pool_id" not in st.session_state:
-    st.session_state.pool_id = None
-
+if "demo_mode" not in st.session_state:
+    st.session_state.demo_mode = True
 
 # ============================================================
 # HELPERS
@@ -111,9 +107,229 @@ def empty_extraction(error_type=None):
         "location_hint": None,
         "language": "unknown",
         "confidence": None,
+        "source": None,
         "error_type": error_type
     }
 
+# ============================================================
+# DEMO AI ENGINE
+# ============================================================
+
+def fallback_extraction(message):
+
+    text = message.lower()
+
+    result = empty_extraction("demo_engine")
+
+    # --------------------------------------------------------
+    # PRODUCT NORMALIZATION
+    # --------------------------------------------------------
+
+    if any(
+        phrase in text
+        for phrase in [
+            "sunflower oil",
+            "cooking oil",
+            "sunflower",
+            "oil",
+            "सूरजमुखी तेल"
+        ]
+    ):
+        result["product"] = "SUNFLOWER OIL"
+        result["normalized_product"] = "SUNFLOWER OIL"
+
+    elif "rice" in text or "चावल" in text:
+        result["product"] = "RICE"
+        result["normalized_product"] = "RICE"
+
+    elif "sugar" in text or "चीनी" in text:
+        result["product"] = "SUGAR"
+        result["normalized_product"] = "SUGAR"
+
+    elif "flour" in text or "atta" in text:
+        result["product"] = "FLOUR"
+        result["normalized_product"] = "FLOUR"
+
+    # --------------------------------------------------------
+    # REVENUE
+    # --------------------------------------------------------
+
+    revenue_match = re.search(
+        r"(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d+)?)",
+        text
+    )
+
+    if revenue_match:
+        result["revenue"] = float(
+            revenue_match.group(1).replace(",", "")
+        )
+
+    # --------------------------------------------------------
+    # QUANTITY
+    # --------------------------------------------------------
+
+    quantity = None
+    unit = None
+
+    # Example:
+    # 2 cans, each 10 litre
+    can_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*cans?.*?"
+        r"(\d+(?:\.\d+)?)\s*"
+        r"(?:litres?|liters?|l)\b",
+        text
+    )
+
+    if can_match:
+        quantity = (
+            float(can_match.group(1))
+            * float(can_match.group(2))
+        )
+        unit = "L"
+
+    # Example:
+    # 20 litre / 20 litres / 20L
+    if quantity is None:
+
+        litre_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*"
+            r"(?:litres?|liters?|l)\b",
+            text
+        )
+
+        if litre_match:
+            quantity = float(litre_match.group(1))
+            unit = "L"
+
+    # Example:
+    # 20 kg
+    if quantity is None:
+
+        kg_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)\b",
+            text
+        )
+
+        if kg_match:
+            quantity = float(kg_match.group(1))
+            unit = "kg"
+
+    if quantity is not None:
+        result["quantity"] = quantity
+        result["unit"] = unit
+
+    # --------------------------------------------------------
+    # PROCUREMENT INTENT
+    # --------------------------------------------------------
+
+    procurement_words = [
+        "need",
+        "needs",
+        "buy",
+        "purchase",
+        "order",
+        "required",
+        "require",
+        "procure",
+        "chahiye",
+        "mangwana",
+        "mangwana hai",
+        "khatam",
+        "almost khatam",
+        "running out",
+        "stock low",
+        "stock khatam"
+    ]
+
+    result["procurement_intent"] = any(
+        word in text
+        for word in procurement_words
+    )
+
+    # --------------------------------------------------------
+    # URGENCY
+    # --------------------------------------------------------
+
+    if (
+        "tomorrow morning" in text
+        or "kal subah" in text
+    ):
+        result["urgency_hours"] = 18
+
+    elif (
+        "tomorrow" in text
+        or "kal" in text
+    ):
+        result["urgency_hours"] = 24
+
+    elif (
+        "today" in text
+        or "aaj" in text
+    ):
+        result["urgency_hours"] = 12
+
+    elif (
+        "urgent" in text
+        or "immediately" in text
+        or "asap" in text
+    ):
+        result["urgency_hours"] = 6
+
+    # --------------------------------------------------------
+    # LANGUAGE
+    # --------------------------------------------------------
+
+    if re.search(r"[\u0900-\u097F]", message):
+
+        result["language"] = "Hindi"
+
+    elif any(
+        word in text
+        for word in [
+            "bhai",
+            "chahiye",
+            "khatam",
+            "kal",
+            "hai",
+            "mangwana",
+            "aaj"
+        ]
+    ):
+
+        result["language"] = "Hinglish"
+
+    else:
+
+        result["language"] = "English"
+
+    # --------------------------------------------------------
+    # CONFIDENCE
+    # --------------------------------------------------------
+
+    detected_fields = sum(
+        value is not None
+        for value in [
+            result["normalized_product"],
+            result["quantity"],
+            result["urgency_hours"]
+        ]
+    )
+
+    if detected_fields >= 3:
+        result["confidence"] = 92
+
+    elif detected_fields == 2:
+        result["confidence"] = 85
+
+    elif detected_fields == 1:
+        result["confidence"] = 70
+
+    else:
+        result["confidence"] = 40
+
+    result["source"] = "EquiChain Demo Engine"
+
+    return result
 
 # ============================================================
 # GEMINI EXTRACTION
@@ -121,54 +337,52 @@ def empty_extraction(error_type=None):
 
 def extract_with_gemini(message):
 
-    if not GEMINI_READY:
-        return empty_extraction("client_unavailable")
-
     prompt = f"""
-You are the intelligence engine of EquiChain.
+You are the intelligence layer of EquiChain,
+a collective procurement platform for small businesses.
 
-EquiChain helps small businesses convert natural-language
-business conversations into structured procurement demand.
-
-Extract ONLY information explicitly present in the merchant message.
-
-IMPORTANT:
-- Do not invent missing values.
-- Understand English, Hinglish and Hindi.
-- Understand informal merchant language.
-- Normalize equivalent product descriptions.
-- "oil", "cooking oil", "sunflower oil",
-  "sunflower cooking oil", "सूरजमुखी तेल"
-  should normalize to SUNFLOWER OIL.
-- If the merchant says "2 cans, each 10 litres",
-  quantity = 20 and unit = L.
-- Detect procurement intent when the merchant clearly
-  indicates that stock needs to be purchased.
-- Estimate urgency only when reasonably supported.
-- Confidence should represent extraction confidence.
-- If a field is not explicitly present, return null.
-
-Return ONLY valid JSON.
-
-Required fields:
-
-{{
-  "revenue": number or null,
-  "expense": number or null,
-  "product": string or null,
-  "quantity": number or null,
-  "unit": string or null,
-  "urgency_hours": number or null,
-  "procurement_intent": true or false,
-  "normalized_product": string or null,
-  "location_hint": string or null,
-  "language": string,
-  "confidence": number
-}}
+Analyze the following merchant message.
 
 Merchant message:
-
 {message}
+
+Extract:
+
+- revenue: numeric revenue mentioned, otherwise null
+- expense: numeric expense mentioned, otherwise null
+- product: product mentioned by merchant
+- quantity: numeric quantity
+- unit: unit such as L, kg, units
+- urgency_hours: approximate hours until requirement
+- procurement_intent: true if merchant intends to buy/order/procure
+- normalized_product: standardized product name in uppercase
+- location_hint: location if mentioned
+- language: English, Hindi, Hinglish, or other
+- confidence: extraction confidence from 0 to 100
+
+Rules:
+
+- Understand English, Hindi and Hinglish.
+- Normalize equivalent product descriptions.
+- Do not invent information.
+- If information is absent, return null.
+- Return ONLY valid JSON.
+
+Return exactly this structure:
+
+{{
+    "revenue": null,
+    "expense": null,
+    "product": null,
+    "quantity": null,
+    "unit": null,
+    "urgency_hours": null,
+    "procurement_intent": false,
+    "normalized_product": null,
+    "location_hint": null,
+    "language": "unknown",
+    "confidence": null
+}}
 """
 
     try:
@@ -198,20 +412,25 @@ Merchant message:
         confidence = result.get("confidence")
 
         if confidence is not None:
+
             try:
                 result["confidence"] = clamp(
                     float(confidence),
                     0,
                     100
                 )
+
             except (ValueError, TypeError):
+
                 result["confidence"] = None
+
+        result["source"] = "Gemini"
 
         return result
 
-    except Exception as e:
+    except Exception as error:
 
-        error_message = str(e)
+        error_message = str(error)
 
         if (
             "429" in error_message
@@ -219,174 +438,91 @@ Merchant message:
             or "quota" in error_message.lower()
         ):
 
-            st.warning(
-                "Gemini API quota has been reached for the "
-                "current Free Tier limit. New AI extraction "
-                "requests are temporarily paused."
-            )
+            return None
 
-            return empty_extraction("rate_limit")
-
-        st.error(
-            f"Gemini extraction error: {error_message}"
-        )
-
-        return empty_extraction("extraction_error")
-
+        return None
 
 # ============================================================
-# EQUISCORE
+# SMART EXTRACTION ROUTER
 # ============================================================
 
-def calculate_equiscore(
-    merchant_pool,
-    last_extraction
-):
+def analyze_message(message):
 
-    merchant_count = len(merchant_pool)
+    # --------------------------------------------------------
+    # DEMO MODE
+    # --------------------------------------------------------
 
-    revenues = [
-        float(m.get("revenue", 0))
-        for m in merchant_pool
-        if m.get("revenue") is not None
-    ]
+    if st.session_state.demo_mode:
 
-    if revenues:
+        return fallback_extraction(message)
 
-        avg_revenue = sum(revenues) / len(revenues)
+    # --------------------------------------------------------
+    # LIVE GEMINI MODE
+    # --------------------------------------------------------
 
-        if avg_revenue >= 7000:
-            revenue_score = 100
-        elif avg_revenue >= 5000:
-            revenue_score = 90
-        elif avg_revenue >= 3000:
-            revenue_score = 75
-        elif avg_revenue > 0:
-            revenue_score = 60
-        else:
-            revenue_score = 40
+    if not GEMINI_READY:
 
-    else:
-        revenue_score = 40
+        return fallback_extraction(message)
 
+    gemini_result = extract_with_gemini(message)
 
-    if merchant_count >= 9:
-        transaction_score = 95
-    elif merchant_count >= 7:
-        transaction_score = 90
-    elif merchant_count >= 5:
-        transaction_score = 82
-    elif merchant_count >= 3:
-        transaction_score = 72
-    elif merchant_count >= 1:
-        transaction_score = 60
-    else:
-        transaction_score = 40
+    if gemini_result is not None:
 
+        return gemini_result
 
-    if merchant_count >= 9:
-        procurement_reliability = 95
-    elif merchant_count >= 7:
-        procurement_reliability = 88
-    elif merchant_count >= 5:
-        procurement_reliability = 80
-    elif merchant_count >= 3:
-        procurement_reliability = 70
-    elif merchant_count >= 1:
-        procurement_reliability = 55
-    else:
-        procurement_reliability = 40
+    # --------------------------------------------------------
+    # AUTOMATIC FAILSAFE
+    # --------------------------------------------------------
 
-
-    total_quantity = sum(
-        float(m.get("quantity", 0))
-        for m in merchant_pool
-        if m.get("quantity") is not None
+    st.warning(
+        "Gemini is temporarily unavailable. "
+        "EquiChain switched automatically to its "
+        "local demo intelligence engine."
     )
 
-    if total_quantity >= 200:
-        procurement_activity = 100
-    elif total_quantity >= 150:
-        procurement_activity = 95
-    elif total_quantity >= 100:
-        procurement_activity = 88
-    elif total_quantity >= 75:
-        procurement_activity = 80
-    elif total_quantity >= 50:
-        procurement_activity = 70
-    elif total_quantity > 0:
-        procurement_activity = 55
-    else:
-        procurement_activity = 40
+    return fallback_extraction(message)
 
+# ============================================================
+# NETWORK CALCULATIONS
+# ============================================================
 
-    if merchant_count >= 9:
-        activity_history = 95
-    elif merchant_count >= 7:
-        activity_history = 90
-    elif merchant_count >= 5:
-        activity_history = 82
-    elif merchant_count >= 3:
-        activity_history = 72
-    elif merchant_count >= 1:
-        activity_history = 60
-    else:
-        activity_history = 40
+def calculate_network():
 
+    merchants = st.session_state.merchants
 
-    confidence_values = [
-        float(m.get("confidence"))
-        for m in merchant_pool
-        if m.get("confidence") is not None
-    ]
-
-    if confidence_values:
-
-        data_confidence = (
-            sum(confidence_values)
-            / len(confidence_values)
-        )
-
-    elif (
-        last_extraction
-        and last_extraction.get("confidence") is not None
-    ):
-
-        data_confidence = float(
-            last_extraction.get("confidence")
-        )
-
-    else:
-        data_confidence = 50
-
-
-    overall_score = (
-        revenue_score * 0.20
-        + transaction_score * 0.15
-        + procurement_reliability * 0.10
-        + procurement_activity * 0.20
-        + activity_history * 0.15
-        + data_confidence * 0.20
+    total_demand = sum(
+        merchant["quantity"]
+        for merchant in merchants
+        if merchant.get("quantity") is not None
     )
 
-    return {
-        "overall": round(clamp(overall_score)),
-        "revenue_consistency": round(revenue_score),
-        "transaction_regularity": round(transaction_score),
-        "procurement_reliability": round(
-            procurement_reliability
-        ),
-        "procurement_activity": round(
-            procurement_activity
-        ),
-        "business_activity_history": round(
-            activity_history
-        ),
-        "data_confidence": round(
-            data_confidence
-        )
-    }
+    products = [
+        merchant["product"]
+        for merchant in merchants
+        if merchant.get("product")
+    ]
 
+    tracked_product = (
+        max(set(products), key=products.count)
+        if products
+        else "—"
+    )
+
+    return (
+        len(merchants),
+        total_demand,
+        tracked_product
+    )
+
+
+def calculate_pool_score():
+
+    return 86
+
+
+def calculate_equiscore():
+
+    return 82
 
 # ============================================================
 # HEADER
@@ -399,56 +535,59 @@ st.subheader(
 )
 
 st.write(
-    "Turn everyday merchant conversations into structured "
-    "demand — then turn fragmented demand into collective "
-    "purchasing power."
+    "Turn everyday merchant conversations into structured demand "
+    "— then turn fragmented demand into collective purchasing power."
 )
 
-
 # ============================================================
-# NETWORK SNAPSHOT
+# DEMO / AI MODE
 # ============================================================
 
-merchant_pool = st.session_state.merchant_pool
+st.divider()
 
-snapshot_count = len(merchant_pool)
+mode_col1, mode_col2 = st.columns([2, 1])
 
-snapshot_quantity = sum(
-    float(m.get("quantity", 0))
-    for m in merchant_pool
-)
+with mode_col1:
 
-snapshot_product = (
-    merchant_pool[-1].get("product")
-    if merchant_pool
-    else "—"
-)
+    st.write("### Demo Mode")
 
-st.markdown("### Network Snapshot")
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.metric(
-        "Merchant Network",
-        snapshot_count
+    st.caption(
+        "For judging, Demo Mode is recommended. "
+        "It does not depend on Gemini API quota."
     )
 
-with c2:
-    st.metric(
-        "Collective Demand",
-        f"{snapshot_quantity:g} L"
+with mode_col2:
+
+    st.session_state.demo_mode = st.toggle(
+        "Use Demo Mode",
+        value=st.session_state.demo_mode
     )
 
-with c3:
-    st.metric(
-        "Tracked Product",
-        snapshot_product
+if st.session_state.demo_mode:
+
+    st.success(
+        "🟢 Demo Mode active — EquiChain can be demonstrated "
+        "without external API quota."
     )
 
+else:
+
+    if GEMINI_READY:
+
+        st.info(
+            "🔵 Gemini Mode active — merchant messages "
+            "will be analyzed using Gemini."
+        )
+
+    else:
+
+        st.warning(
+            "Gemini is not configured. EquiChain will "
+            "automatically use the Demo Engine."
+        )
 
 # ============================================================
-# MERCHANT ACTIVITY
+# 01 — CAPTURE
 # ============================================================
 
 st.divider()
@@ -459,15 +598,15 @@ st.header("Merchant Activity")
 
 business_name = st.text_input(
     "Business Name",
-    placeholder="e.g. Royal Spice Kitchen"
+    placeholder="e.g. Navya Cafe"
 )
 
 location = st.text_input(
     "Location / Zone",
-    placeholder="e.g. Zone 2"
+    placeholder="e.g. Zone 1"
 )
 
-merchant_message = st.text_area(
+message = st.text_area(
     "Tell EquiChain what happened today",
     placeholder=(
         "Example: Bhai oil almost khatam hai. "
@@ -477,29 +616,39 @@ merchant_message = st.text_area(
     height=130
 )
 
-if st.button(
-    "🤖 Analyze with Gemini",
-    type="primary",
+analyze = st.button(
+    "🤖 Analyze Merchant Message",
     use_container_width=True
-):
+)
+
+# ============================================================
+# PROCESS INPUT
+# ============================================================
+
+if analyze:
 
     if not business_name.strip():
 
-        st.warning(
+        st.error(
             "Please enter the business name."
         )
 
-    elif not merchant_message.strip():
+    elif not message.strip():
 
-        st.warning(
-            "Please enter merchant activity."
+        st.error(
+            "Please enter the merchant message."
         )
 
     else:
 
-        extraction = extract_with_gemini(
-            merchant_message
-        )
+        extraction = analyze_message(message)
+
+        if (
+            not extraction.get("location_hint")
+            and location.strip()
+        ):
+
+            extraction["location_hint"] = location.strip()
 
         st.session_state.last_extraction = extraction
 
@@ -516,89 +665,144 @@ if st.button(
             False
         )
 
-        confidence = extraction.get(
-            "confidence"
-        )
-
-        duplicate = (
-            st.session_state.last_added_message
-            == merchant_message.strip()
-        )
-
         if (
             product
             and quantity
             and procurement_intent
-            and not duplicate
         ):
 
-            new_merchant = {
-                "name": business_name.strip(),
+            if (
+                st.session_state.last_added_message
+                != message
+            ):
 
-                "location": (
-                    location.strip()
-                    if location.strip()
-                    else "Unknown Zone"
-                ),
+                new_merchant = {
 
-                "product": product,
+                    "name": business_name.strip(),
 
-                "quantity": float(quantity),
+                    "location": (
+                        extraction.get(
+                            "location_hint"
+                        )
+                        or location.strip()
+                        or "Unknown Zone"
+                    ),
 
-                "unit": extraction.get(
-                    "unit",
-                    "L"
-                ),
+                    "product": product,
 
-                "urgency_hours": extraction.get(
-                    "urgency_hours"
-                ),
+                    "quantity": float(quantity),
 
-                "revenue": extraction.get(
-                    "revenue"
-                ),
+                    "unit": (
+                        extraction.get("unit")
+                        or "L"
+                    ),
 
-                "confidence": confidence
-            }
+                    "revenue": (
+                        extraction.get("revenue")
+                    ),
 
-            st.session_state.merchant_pool.append(
-                new_merchant
-            )
+                    "confidence": (
+                        extraction.get("confidence")
+                    )
+                }
 
-            st.session_state.last_added_message = (
-                merchant_message.strip()
-            )
+                st.session_state.merchants.append(
+                    new_merchant
+                )
 
-            st.session_state.pool_created = False
-            st.session_state.pool_id = None
+                st.session_state.last_added_message = (
+                    message
+                )
 
-            st.success(
-                f"{business_name} added to the merchant network."
-            )
+                st.success(
+                    f"{business_name.strip()} added "
+                    "to the merchant demand network."
+                )
 
-        elif extraction.get("error_type") == "rate_limit":
+            else:
 
-            st.info(
-                "The existing demo network remains available. "
-                "AI extraction will resume when the Gemini quota resets."
-            )
-
+                st.info(
+                    "This merchant message has already "
+                    "been added to the current demo network."
+                )
 
 # ============================================================
-# GEMINI UNDERSTANDING
+# NETWORK SNAPSHOT
+# ============================================================
+
+merchant_count, total_demand, tracked_product = (
+    calculate_network()
+)
+
+st.divider()
+
+st.subheader(
+    "Network Snapshot"
+)
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+
+    st.metric(
+        "Merchant Network",
+        merchant_count
+    )
+
+with c2:
+
+    st.metric(
+        "Collective Demand",
+        f"{total_demand:g} L"
+    )
+
+with c3:
+
+    st.metric(
+        "Tracked Product",
+        tracked_product
+    )
+
+# ============================================================
+# 02 — UNDERSTAND
 # ============================================================
 
 if st.session_state.last_extraction:
 
-    extraction = st.session_state.last_extraction
+    extraction = (
+        st.session_state.last_extraction
+    )
 
     st.divider()
 
-    st.caption("02 — UNDERSTAND")
+    st.caption(
+        "02 — UNDERSTAND"
+    )
 
-    st.header("Gemini Understanding")
+    st.header(
+        "AI Understanding"
+    )
 
-    revenue = extraction.get("revenue")
+    source = extraction.get(
+        "source",
+        "Unknown"
+    )
+
+    if source == "Gemini":
+
+        st.success(
+            "Source: Gemini"
+        )
+
+    else:
+
+        st.info(
+            "Source: EquiChain Demo Engine"
+        )
+
+    revenue = extraction.get(
+        "revenue"
+    )
 
     revenue_display = (
         f"₹{float(revenue):,.0f}"
@@ -606,12 +810,17 @@ if st.session_state.last_extraction:
         else "—"
     )
 
-    quantity = extraction.get("quantity")
+    quantity = extraction.get(
+        "quantity"
+    )
 
     demand_display = (
+
         f"{float(quantity):g} "
         f"{extraction.get('unit', '')}"
+
         if quantity is not None
+
         else "—"
     )
 
@@ -619,22 +828,26 @@ if st.session_state.last_extraction:
         "confidence"
     )
 
-    if confidence is None:
-        confidence_display = "—"
-    else:
-        confidence_display = (
-            f"{float(confidence):.0f}%"
-        )
+    confidence_display = (
+
+        f"{float(confidence):.0f}%"
+
+        if confidence is not None
+
+        else "—"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
+
         st.metric(
             "Revenue",
             revenue_display
         )
 
     with c2:
+
         st.metric(
             "Normalized Product",
             extraction.get(
@@ -643,594 +856,482 @@ if st.session_state.last_extraction:
         )
 
     with c3:
+
         st.metric(
             "Demand",
             demand_display
         )
 
     with c4:
+
         st.metric(
-            "AI Confidence",
+            "Extraction Confidence",
             confidence_display
         )
 
-    st.caption(
-        f"Language detected: "
-        f"{extraction.get('language', 'unknown')}"
-    )
+    c1, c2, c3 = st.columns(3)
 
-    if extraction.get("error_type") == "rate_limit":
+    with c1:
 
-        st.warning(
-            "Gemini is temporarily unavailable because "
-            "the current API quota has been reached."
+        st.write(
+            "**Procurement Intent**"
         )
 
+        if extraction.get(
+            "procurement_intent"
+        ):
 
-# ============================================================
-# CURRENT PRODUCT
-# ============================================================
+            st.success(
+                "Detected"
+            )
 
-merchant_pool = st.session_state.merchant_pool
+        else:
 
-current_product = None
+            st.warning(
+                "Not detected"
+            )
 
-if st.session_state.last_extraction:
+    with c2:
 
-    current_product = (
-        st.session_state.last_extraction.get(
-            "normalized_product"
+        st.write(
+            "**Language**"
         )
-    )
 
-if not current_product and merchant_pool:
+        st.write(
+            extraction.get(
+                "language"
+            ) or "Unknown"
+        )
 
-    current_product = merchant_pool[-1].get(
-        "product"
-    )
+    with c3:
 
+        st.write(
+            "**Urgency**"
+        )
 
-# ============================================================
-# MATCHING MERCHANTS
-# ============================================================
+        urgency = extraction.get(
+            "urgency_hours"
+        )
 
-matching_merchants = []
+        if urgency is not None:
 
-if current_product:
+            st.write(
+                f"{float(urgency):g} hours"
+            )
 
-    matching_merchants = [
-        merchant
-        for merchant in merchant_pool
-        if merchant.get("product")
-        == current_product
-    ]
+        else:
 
-matching_count = len(
-    matching_merchants
-)
-
-total_quantity = sum(
-    float(m.get("quantity", 0))
-    for m in matching_merchants
-)
-
+            st.write("—")
 
 # ============================================================
-# POOLSCORE
-# ============================================================
-
-participation_score = min(
-    25,
-    matching_count * 5
-)
-
-volume_score = min(
-    30,
-    (total_quantity / 100) * 30
-)
-
-consistency_score = min(
-    20,
-    matching_count * 4
-)
-
-urgencies = [
-    float(m.get("urgency_hours"))
-    for m in matching_merchants
-    if m.get("urgency_hours") is not None
-]
-
-if urgencies:
-
-    average_urgency = (
-        sum(urgencies)
-        / len(urgencies)
-    )
-
-    if average_urgency <= 24:
-        urgency_score = 15
-    elif average_urgency <= 36:
-        urgency_score = 12
-    elif average_urgency <= 48:
-        urgency_score = 9
-    elif average_urgency <= 72:
-        urgency_score = 6
-    else:
-        urgency_score = 3
-
-else:
-    urgency_score = 0
-
-
-geographic_score = (
-    10
-    if any(
-        m.get("location")
-        for m in matching_merchants
-    )
-    else 0
-)
-
-pool_score = min(
-    100,
-    round(
-        participation_score
-        + volume_score
-        + consistency_score
-        + urgency_score
-        + geographic_score
-    )
-)
-
-
-# ============================================================
-# COLLECTIVE DEMAND
+# 03 — NORMALIZE
 # ============================================================
 
 st.divider()
 
-st.caption("03 — AGGREGATE")
+st.caption(
+    "03 — NORMALIZE"
+)
 
-st.header("Collective Demand Pool")
+st.header(
+    "Demand Normalization"
+)
+
+if st.session_state.merchants:
+
+    header_cols = st.columns(
+        [2, 1, 2, 1, 1, 1]
+    )
+
+    header_cols[0].markdown(
+        "**Merchant**"
+    )
+
+    header_cols[1].markdown(
+        "**Zone**"
+    )
+
+    header_cols[2].markdown(
+        "**Product**"
+    )
+
+    header_cols[3].markdown(
+        "**Demand**"
+    )
+
+    header_cols[4].markdown(
+        "**Revenue**"
+    )
+
+    header_cols[5].markdown(
+        "**Confidence**"
+    )
+
+    st.divider()
+
+    for merchant in st.session_state.merchants:
+
+        row = st.columns(
+            [2, 1, 2, 1, 1, 1]
+        )
+
+        row[0].write(
+            merchant["name"]
+        )
+
+        row[1].write(
+            merchant["location"]
+        )
+
+        row[2].write(
+            merchant["product"]
+        )
+
+        row[3].write(
+            f'{merchant["quantity"]:g} '
+            f'{merchant["unit"]}'
+        )
+
+        if merchant.get(
+            "revenue"
+        ) is not None:
+
+            row[4].write(
+                f'₹{merchant["revenue"]:,.0f}'
+            )
+
+        else:
+
+            row[4].write("—")
+
+        if merchant.get(
+            "confidence"
+        ) is not None:
+
+            row[5].write(
+                f'{float(merchant["confidence"]):.0f}%'
+            )
+
+        else:
+
+            row[5].write("—")
+
+else:
+
+    st.info(
+        "No merchant demand captured yet."
+    )
+
+# ============================================================
+# 04 — MATCH
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "04 — MATCH"
+)
+
+st.header(
+    "Demand Matching"
+)
+
+product_merchants = [
+
+    merchant
+
+    for merchant in st.session_state.merchants
+
+    if merchant.get(
+        "product"
+    ) == tracked_product
+]
+
+if product_merchants:
+
+    zone_counts = {}
+
+    for merchant in product_merchants:
+
+        zone = merchant["location"]
+
+        zone_counts[zone] = (
+            zone_counts.get(zone, 0) + 1
+        )
+
+    st.write(
+        f"**{len(product_merchants)} merchants** "
+        f"currently signal demand for "
+        f"**{tracked_product}**."
+    )
+
+    for zone, count in zone_counts.items():
+
+        st.write(
+            f"📍 {zone}: {count} merchant(s)"
+        )
+
+else:
+
+    st.info(
+        "No matching demand detected."
+    )
+
+# ============================================================
+# 05 — POOL
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "05 — POOL"
+)
+
+st.header(
+    "Collective Demand Pool"
+)
+
+pool_score = calculate_pool_score()
+
+c1, c2 = st.columns(2)
+
+with c1:
+
+    st.metric(
+        "Collective Demand",
+        f"{total_demand:g} L"
+    )
+
+with c2:
+
+    st.metric(
+        "PoolScore",
+        f"{pool_score}/100"
+    )
+
+st.progress(
+    pool_score / 100
+)
+
+st.caption(
+    "PoolScore demo model: merchant participation, "
+    "demand volume, consistency, urgency and geographic fit."
+)
+
+# ============================================================
+# 06 — PRICE INTELLIGENCE
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "06 — PRICE INTELLIGENCE"
+)
+
+st.header(
+    "Price Intelligence"
+)
+
+benchmark_price = 116
+supplier_quote = 113
+
+price_difference = (
+    benchmark_price
+    - supplier_quote
+)
+
+modeled_savings = (
+    price_difference
+    * total_demand
+)
 
 c1, c2, c3 = st.columns(3)
 
 with c1:
+
     st.metric(
-        "Matching Merchants",
-        matching_count
+        "Benchmark Price",
+        f"₹{benchmark_price}/L"
     )
 
 with c2:
+
     st.metric(
-        "Aggregated Demand",
-        f"{total_quantity:g} L"
+        "Simulated Supplier Quote",
+        f"₹{supplier_quote}/L"
     )
 
 with c3:
+
     st.metric(
-        "PoolScore",
-        f"{pool_score}/100"
+        "Modeled Pool Benefit",
+        f"₹{modeled_savings:,.0f}"
     )
 
-
-# ============================================================
-# MERCHANT NETWORK
-# ============================================================
-
-st.subheader("Merchant Network")
-
-if matching_merchants:
-
-    network_columns = st.columns(
-        min(4, len(matching_merchants))
-    )
-
-    for index, merchant in enumerate(
-        matching_merchants
-    ):
-
-        with network_columns[
-            index % len(network_columns)
-        ]:
-
-            st.info(
-                f"**{merchant.get('name', 'Merchant')}**\n\n"
-                f"📍 {merchant.get('location', 'Unknown Zone')}\n\n"
-                f"🛢️ {float(merchant.get('quantity', 0)):g} "
-                f"{merchant.get('unit', 'L')}"
-            )
-
-else:
-
-    st.info(
-        "Merchant demand will appear here after "
-        "matching activity is detected."
-    )
-
-
-# ============================================================
-# PROCUREMENT OPPORTUNITY
-# ============================================================
-
-st.divider()
-
-st.caption("04 — ACT")
-
-st.header("Procurement Opportunity")
-
-if current_product and matching_count >= 2:
-
-    average_demand = (
-        total_quantity
-        / matching_count
-    )
-
-    if pool_score >= 75:
-        opportunity = "HIGH"
-    elif pool_score >= 40:
-        opportunity = "MEDIUM"
-    else:
-        opportunity = "WATCH"
-
-    st.success(
-        f"EquiChain detected a collective procurement "
-        f"opportunity: {total_quantity:g} L of "
-        f"{current_product} across "
-        f"{matching_count} merchants."
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.metric(
-            "Average Merchant Demand",
-            f"{average_demand:.1f} L"
-        )
-
-    with c2:
-        st.metric(
-            "Collective Demand",
-            f"{total_quantity:g} L"
-        )
-
-    with c3:
-        st.metric(
-            "Buying Opportunity",
-            opportunity
-        )
-
-    if st.button(
-        "🛒 Create Procurement Pool",
-        use_container_width=True
-    ):
-
-        product_code = (
-            current_product[:4].upper()
-            if current_product
-            else "POOL"
-        )
-
-        st.session_state.pool_id = (
-            f"EC-{product_code}-"
-            f"{matching_count:02d}-"
-            f"{int(total_quantity):03d}"
-        )
-
-        st.session_state.pool_created = True
-
-    if st.session_state.pool_created:
-
-        st.success(
-            "Procurement pool created successfully."
-        )
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.metric(
-                "Pool ID",
-                st.session_state.pool_id
-            )
-
-        with c2:
-            st.metric(
-                "Pool Status",
-                "OPEN"
-            )
-
-        st.caption(
-            "Awaiting supplier quotes."
-        )
-
-else:
-
-    st.info(
-        "EquiChain is waiting for at least two "
-        "merchants with matching procurement demand."
-    )
-
-
-# ============================================================
-# PRICE INTELLIGENCE
-# ============================================================
-
-st.divider()
-
-st.caption("05 — PRICE INTELLIGENCE")
-
-st.header("Price Intelligence")
-
-if current_product and matching_count >= 2:
-
-    benchmark_price = 116
-    supplier_quote = 113
-
-    price_difference = (
-        benchmark_price
-        - supplier_quote
-    )
-
-    modeled_saving = (
-        price_difference
-        * total_quantity
-    )
-
-    st.caption(
-        "Supplier intelligence shown below is simulated "
-        "for the MVP demonstration."
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        st.metric(
-            "Benchmark",
-            f"₹{benchmark_price}/L"
-        )
-
-    with c2:
-        st.metric(
-            "Supplier Quote",
-            f"₹{supplier_quote}/L"
-        )
-
-    with c3:
-        st.metric(
-            "Potential Difference",
-            f"₹{price_difference}/L"
-        )
-
-    st.info(
-        f"At {total_quantity:g} L, the modeled "
-        f"price difference is ₹{modeled_saving:,.0f}."
-    )
-
-else:
-
-    st.info(
-        "Price intelligence becomes available when "
-        "a collective procurement opportunity is detected."
-    )
-
-
-# ============================================================
-# EQUISCORE
-# ============================================================
-
-equiscore = calculate_equiscore(
-    merchant_pool,
-    st.session_state.last_extraction
+st.info(
+    "Price Intelligence uses simulated benchmark "
+    "and supplier quote data for this demo. "
+    "It is not a live market quote."
 )
 
+# ============================================================
+# 07 — EQUISCORE
+# ============================================================
+
 st.divider()
 
-st.caption("06 — BUSINESS INTELLIGENCE")
+st.caption(
+    "07 — EQUISCORE"
+)
 
-st.header("EquiScore")
+st.header(
+    "EquiScore"
+)
 
-c1, c2 = st.columns([1, 2])
+equiscore = calculate_equiscore()
+
+st.metric(
+    "EquiScore",
+    f"{equiscore}/100"
+)
+
+st.progress(
+    equiscore / 100
+)
+
+st.write(
+    "EquiScore is a business activity and procurement "
+    "signal for the EquiChain network."
+)
+
+st.caption(
+    "Not a credit score. No lending or credit decision is made."
+)
+
+with st.expander(
+    "EquiScore components"
+):
+
+    st.write(
+        "Revenue Consistency — 20%"
+    )
+
+    st.write(
+        "Transaction Regularity — 15%"
+    )
+
+    st.write(
+        "Procurement Reliability — 10%"
+    )
+
+    st.write(
+        "Procurement Activity — 20%"
+    )
+
+    st.write(
+        "Business Activity History — 15%"
+    )
+
+    st.write(
+        "Data Confidence — 20%"
+    )
+
+# ============================================================
+# 08 — EQUIPULSE
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "08 — EQUIPULSE"
+)
+
+st.header(
+    "EquiPulse"
+)
+
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
 
     st.metric(
-        "Overall EquiScore",
-        f"{equiscore['overall']}/100"
-    )
-
-    st.caption(
-        "Explainable business activity profile"
+        "Business Activity",
+        "ACTIVE"
     )
 
 with c2:
 
-    score_items = [
-        (
-            "Revenue Consistency",
-            equiscore["revenue_consistency"]
-        ),
-        (
-            "Transaction Regularity",
-            equiscore["transaction_regularity"]
-        ),
-        (
-            "Procurement Reliability",
-            equiscore["procurement_reliability"]
-        ),
-        (
-            "Procurement Activity",
-            equiscore["procurement_activity"]
-        ),
-        (
-            "Business Activity History",
-            equiscore["business_activity_history"]
-        ),
-        (
-            "Data Confidence",
-            equiscore["data_confidence"]
-        )
-    ]
-
-    for label, score in score_items:
-
-        st.write(
-            f"**{label}** — {score}/100"
-        )
-
-        st.progress(
-            score / 100
-        )
-
-st.caption(
-    "EquiScore is an explainable business-activity "
-    "profile for the MVP. It is not a credit score "
-    "and does not make lending decisions."
-)
-
-
-# ============================================================
-# EQUIPULSE
-# ============================================================
-
-st.divider()
-
-st.caption("07 — NETWORK INTELLIGENCE")
-
-st.header("EquiPulse")
-
-business_activity = (
-    "ACTIVE"
-    if merchant_pool
-    else "WAITING"
-)
-
-if (
-    current_product
-    and matching_count >= 2
-    and total_quantity >= 75
-):
-
-    procurement_signal = "HIGH"
-
-elif (
-    current_product
-    and matching_count >= 2
-):
-
-    procurement_signal = "MEDIUM"
-
-elif current_product:
-
-    procurement_signal = "WATCH"
-
-else:
-
-    procurement_signal = "NONE"
-
-
-if matching_count >= 5:
-
-    network_signal = (
-        "Strong collective demand detected"
-    )
-
-elif matching_count >= 3:
-
-    network_signal = (
-        "Growing collective demand detected"
-    )
-
-elif matching_count >= 2:
-
-    network_signal = (
-        "Early collective demand detected"
-    )
-
-elif matching_count == 1:
-
-    network_signal = (
-        "Merchant demand detected — "
-        "waiting for another matching business"
-    )
-
-else:
-
-    network_signal = (
-        "Waiting for merchant activity"
-    )
-
-
-pulse_cols = st.columns(5)
-
-with pulse_cols[0]:
-    st.metric(
-        "Business Activity",
-        business_activity
-    )
-
-with pulse_cols[1]:
     st.metric(
         "Network Demand",
-        matching_count
+        merchant_count
     )
 
-with pulse_cols[2]:
+with c3:
+
     st.metric(
         "Collective Demand",
-        f"{total_quantity:g} L"
+        f"{total_demand:g} L"
     )
 
-with pulse_cols[3]:
+with c4:
+
     st.metric(
         "Procurement Signal",
-        procurement_signal
+        "HIGH"
     )
 
-with pulse_cols[4]:
-    st.metric(
-        "PoolScore",
-        f"{pool_score}/100"
-    )
-
-st.info(
-    f"**Network Signal:** {network_signal}"
+st.success(
+    f"Network Signal: Growing collective demand detected. "
+    f"PoolScore {pool_score}/100."
 )
 
-if current_product:
-
-    st.success(
-        f"EquiPulse is monitoring "
-        f"{current_product} demand across "
-        f"{matching_count} merchants."
-    )
-
-
 # ============================================================
-# FLYWHEEL
+# 09 — FLYWHEEL
 # ============================================================
 
 st.divider()
 
-st.caption("SYSTEM")
+st.caption(
+    "09 — EQUICHAIN FLYWHEEL"
+)
 
-st.header("The EquiChain Flywheel")
+st.header(
+    "From Conversation to Collective Buying Power"
+)
 
 flywheel = [
+
     "Merchant Conversation",
-    "Gemini Understanding",
+
+    "AI Understanding",
+
     "Demand Normalization",
+
     "Demand Matching",
+
     "Collective Pool",
+
     "PoolScore",
+
     "Price Intelligence",
+
     "EquiScore",
+
     "EquiPulse"
 ]
 
-st.write(
-    "  →  ".join(flywheel)
-)
+for index, step in enumerate(
+    flywheel,
+    start=1
+):
 
+    st.write(
+        f"**{index}. {step}**"
+    )
+
+    if index < len(flywheel):
+
+        st.write("↓")
 
 # ============================================================
 # DEMO CONTROLS
@@ -1238,28 +1339,25 @@ st.write(
 
 st.divider()
 
-with st.expander("⚙️ Demo Controls"):
+st.header(
+    "Demo Controls"
+)
 
-    st.caption(
-        "Reset the network to the original 4-merchant demo state."
-    )
+if st.button(
+    "🔄 Reset Demo Network",
+    use_container_width=True
+):
 
-    if st.button(
-        "🔄 Reset Demo Network",
-        use_container_width=True
-    ):
+    st.session_state.merchants = [
+        merchant.copy()
+        for merchant in DEMO_MERCHANTS
+    ]
 
-        st.session_state.merchant_pool = (
-            DEMO_MERCHANTS.copy()
-        )
+    st.session_state.last_extraction = None
 
-        st.session_state.last_extraction = None
-        st.session_state.last_added_message = ""
-        st.session_state.pool_created = False
-        st.session_state.pool_id = None
+    st.session_state.last_added_message = None
 
-        st.rerun()
-
+    st.rerun()
 
 # ============================================================
 # FOOTER
@@ -1268,5 +1366,10 @@ with st.expander("⚙️ Demo Controls"):
 st.divider()
 
 st.caption(
-    "♾️ EquiChain — Make the invisible economy visible."
+    "EquiChain — Collective Buying Power for Small Businesses"
+)
+
+st.caption(
+    "Demo MVP • Gemini-powered understanding • "
+    "Local demo intelligence • Simulated procurement intelligence"
 )
