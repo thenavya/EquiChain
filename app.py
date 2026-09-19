@@ -3,18 +3,12 @@ from google import genai
 import json
 import re
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-
 st.set_page_config(
     page_title="EquiChain",
     page_icon="♾️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
-
 
 # ============================================================
 # GEMINI CLIENT
@@ -29,7 +23,7 @@ except Exception:
 
 
 # ============================================================
-# DEMO MERCHANT NETWORK
+# DEMO MERCHANTS
 # ============================================================
 
 DEMO_MERCHANTS = [
@@ -97,11 +91,28 @@ if "pool_id" not in st.session_state:
 
 
 # ============================================================
-# HELPER
+# HELPERS
 # ============================================================
 
 def clamp(value, minimum=0, maximum=100):
     return max(minimum, min(maximum, value))
+
+
+def empty_extraction(error_type=None):
+    return {
+        "revenue": None,
+        "expense": None,
+        "product": None,
+        "quantity": None,
+        "unit": None,
+        "urgency_hours": None,
+        "procurement_intent": False,
+        "normalized_product": None,
+        "location_hint": None,
+        "language": "unknown",
+        "confidence": None,
+        "error_type": error_type
+    }
 
 
 # ============================================================
@@ -111,19 +122,7 @@ def clamp(value, minimum=0, maximum=100):
 def extract_with_gemini(message):
 
     if not GEMINI_READY:
-        return {
-            "revenue": None,
-            "expense": None,
-            "product": None,
-            "quantity": None,
-            "unit": None,
-            "urgency_hours": None,
-            "procurement_intent": False,
-            "normalized_product": None,
-            "location_hint": None,
-            "language": "unknown",
-            "confidence": 0
-        }
+        return empty_extraction("client_unavailable")
 
     prompt = f"""
 You are the intelligence engine of EquiChain.
@@ -147,6 +146,7 @@ IMPORTANT:
   indicates that stock needs to be purchased.
 - Estimate urgency only when reasonably supported.
 - Confidence should represent extraction confidence.
+- If a field is not explicitly present, return null.
 
 Return ONLY valid JSON.
 
@@ -193,29 +193,49 @@ Merchant message:
             raw
         ).strip()
 
-        return json.loads(raw)
+        result = json.loads(raw)
+
+        confidence = result.get("confidence")
+
+        if confidence is not None:
+            try:
+                result["confidence"] = clamp(
+                    float(confidence),
+                    0,
+                    100
+                )
+            except (ValueError, TypeError):
+                result["confidence"] = None
+
+        return result
 
     except Exception as e:
 
-        st.error(f"Gemini extraction error: {e}")
+        error_message = str(e)
 
-        return {
-            "revenue": None,
-            "expense": None,
-            "product": None,
-            "quantity": None,
-            "unit": None,
-            "urgency_hours": None,
-            "procurement_intent": False,
-            "normalized_product": None,
-            "location_hint": None,
-            "language": "unknown",
-            "confidence": 0
-        }
+        if (
+            "429" in error_message
+            or "Rate limit exceeded" in error_message
+            or "quota" in error_message.lower()
+        ):
+
+            st.warning(
+                "Gemini API quota has been reached for the "
+                "current Free Tier limit. New AI extraction "
+                "requests are temporarily paused."
+            )
+
+            return empty_extraction("rate_limit")
+
+        st.error(
+            f"Gemini extraction error: {error_message}"
+        )
+
+        return empty_extraction("extraction_error")
 
 
 # ============================================================
-# DYNAMIC EQUISCORE
+# EQUISCORE
 # ============================================================
 
 def calculate_equiscore(
@@ -225,10 +245,6 @@ def calculate_equiscore(
 
     merchant_count = len(merchant_pool)
 
-    # --------------------------------------------------------
-    # Revenue Consistency
-    # --------------------------------------------------------
-
     revenues = [
         float(m.get("revenue", 0))
         for m in merchant_pool
@@ -237,9 +253,7 @@ def calculate_equiscore(
 
     if revenues:
 
-        avg_revenue = (
-            sum(revenues) / len(revenues)
-        )
+        avg_revenue = sum(revenues) / len(revenues)
 
         if avg_revenue >= 7000:
             revenue_score = 100
@@ -256,10 +270,6 @@ def calculate_equiscore(
         revenue_score = 40
 
 
-    # --------------------------------------------------------
-    # Transaction Regularity
-    # --------------------------------------------------------
-
     if merchant_count >= 9:
         transaction_score = 95
     elif merchant_count >= 7:
@@ -274,11 +284,6 @@ def calculate_equiscore(
         transaction_score = 40
 
 
-    # --------------------------------------------------------
-    # Procurement Reliability
-    # MVP proxy only
-    # --------------------------------------------------------
-
     if merchant_count >= 9:
         procurement_reliability = 95
     elif merchant_count >= 7:
@@ -292,10 +297,6 @@ def calculate_equiscore(
     else:
         procurement_reliability = 40
 
-
-    # --------------------------------------------------------
-    # Procurement Activity
-    # --------------------------------------------------------
 
     total_quantity = sum(
         float(m.get("quantity", 0))
@@ -319,10 +320,6 @@ def calculate_equiscore(
         procurement_activity = 40
 
 
-    # --------------------------------------------------------
-    # Business Activity History
-    # --------------------------------------------------------
-
     if merchant_count >= 9:
         activity_history = 95
     elif merchant_count >= 7:
@@ -337,10 +334,6 @@ def calculate_equiscore(
         activity_history = 40
 
 
-    # --------------------------------------------------------
-    # Data Confidence
-    # --------------------------------------------------------
-
     confidence_values = [
         float(m.get("confidence"))
         for m in merchant_pool
@@ -354,23 +347,18 @@ def calculate_equiscore(
             / len(confidence_values)
         )
 
-    elif last_extraction:
+    elif (
+        last_extraction
+        and last_extraction.get("confidence") is not None
+    ):
 
         data_confidence = float(
-            last_extraction.get(
-                "confidence",
-                75
-            )
+            last_extraction.get("confidence")
         )
 
     else:
-
         data_confidence = 50
 
-
-    # --------------------------------------------------------
-    # Weighted Score
-    # --------------------------------------------------------
 
     overall_score = (
         revenue_score * 0.20
@@ -529,8 +517,7 @@ if st.button(
         )
 
         confidence = extraction.get(
-            "confidence",
-            0
+            "confidence"
         )
 
         duplicate = (
@@ -589,6 +576,13 @@ if st.button(
                 f"{business_name} added to the merchant network."
             )
 
+        elif extraction.get("error_type") == "rate_limit":
+
+            st.info(
+                "The existing demo network remains available. "
+                "AI extraction will resume when the Gemini quota resets."
+            )
+
 
 # ============================================================
 # GEMINI UNDERSTANDING
@@ -621,12 +615,16 @@ if st.session_state.last_extraction:
         else "—"
     )
 
-    confidence = float(
-        extraction.get(
-            "confidence",
-            0
-        )
+    confidence = extraction.get(
+        "confidence"
     )
+
+    if confidence is None:
+        confidence_display = "—"
+    else:
+        confidence_display = (
+            f"{float(confidence):.0f}%"
+        )
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -653,13 +651,20 @@ if st.session_state.last_extraction:
     with c4:
         st.metric(
             "AI Confidence",
-            f"{confidence:.0f}%"
+            confidence_display
         )
 
     st.caption(
         f"Language detected: "
         f"{extraction.get('language', 'unknown')}"
     )
+
+    if extraction.get("error_type") == "rate_limit":
+
+        st.warning(
+            "Gemini is temporarily unavailable because "
+            "the current API quota has been reached."
+        )
 
 
 # ============================================================
@@ -754,7 +759,6 @@ if urgencies:
         urgency_score = 3
 
 else:
-
     urgency_score = 0
 
 
@@ -766,7 +770,6 @@ geographic_score = (
     )
     else 0
 )
-
 
 pool_score = min(
     100,
@@ -1039,7 +1042,6 @@ with c1:
         "Explainable business activity profile"
     )
 
-
 with c2:
 
     score_items = [
@@ -1096,18 +1098,11 @@ st.caption("07 — NETWORK INTELLIGENCE")
 
 st.header("EquiPulse")
 
-
-# FIX:
-# The demo network itself represents active business activity.
-# Therefore Business Activity should not say WAITING simply
-# because the app has just been refreshed.
-
 business_activity = (
     "ACTIVE"
     if merchant_pool
     else "WAITING"
 )
-
 
 if (
     current_product
@@ -1196,7 +1191,6 @@ with pulse_cols[4]:
         "PoolScore",
         f"{pool_score}/100"
     )
-
 
 st.info(
     f"**Network Signal:** {network_signal}"
